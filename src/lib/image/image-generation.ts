@@ -118,11 +118,14 @@ function createTimeoutFetch(timeoutMs: number): typeof fetch {
 
 function createFalAdapter(modelId: string, falApiKey?: string) {
   const key = falApiKey ?? getEnv().FAL_KEY;
-  const config = {
+  if (!key) {
+    throw new Error('FAL_KEY is required for image generation');
+  }
+
+  return falImage(modelId, {
     fetch: createTimeoutFetch(IMAGE_GENERATION_TIMEOUT_MS),
-    ...(key ? { apiKey: key } : {}),
-  };
-  return falImage(modelId, config);
+    apiKey: key,
+  });
 }
 
 function truncatePromptForModel(

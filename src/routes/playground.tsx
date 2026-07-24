@@ -23,8 +23,12 @@ function PlaygroundPage() {
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  async function onSubmit(event: FormEvent<HTMLFormElement>) {
+  function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    void submitForm(event);
+  }
+
+  async function submitForm(event: FormEvent<HTMLFormElement>) {
     const form = event.currentTarget;
     const message = new FormData(form).get('message');
 

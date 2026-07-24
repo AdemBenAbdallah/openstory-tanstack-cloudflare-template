@@ -26,10 +26,7 @@ import { microsToDisplayUsd } from '@/lib/billing/money';
 import { createBillingMethods } from '@/lib/db/scoped/billing';
 import { sendOtpEmail } from '@/lib/services/email-service';
 import { DEV_OTP_CODE } from '@/lib/auth/dev-otp';
-import {
-  isGoogleAuthConfigured,
-  isLocalRequestHost,
-} from '@/lib/utils/environment';
+import { isLocalRequestHost } from '@/lib/utils/environment';
 import { apiKey } from '@better-auth/api-key';
 import { passkey as passkeyPlugin } from '@better-auth/passkey';
 
@@ -152,16 +149,17 @@ function createAuth() {
     // (isGoogleAuthConfigured is also what hides the login form's Google
     // button, via getAuthOptionsFn). Unconfigured environments (local
     // dev by default, PR previews) don't register the provider at all.
-    socialProviders: isGoogleAuthConfigured()
-      ? {
-          google: {
-            clientId: runtimeEnv.GOOGLE_CLIENT_ID,
-            clientSecret: runtimeEnv.GOOGLE_CLIENT_SECRET,
-            enabled: true,
-            overrideUserInfoOnSignIn: true,
-          },
-        }
-      : {},
+    socialProviders:
+      runtimeEnv.GOOGLE_CLIENT_ID && runtimeEnv.GOOGLE_CLIENT_SECRET
+        ? {
+            google: {
+              clientId: runtimeEnv.GOOGLE_CLIENT_ID,
+              clientSecret: runtimeEnv.GOOGLE_CLIENT_SECRET,
+              enabled: true,
+              overrideUserInfoOnSignIn: true,
+            },
+          }
+        : {},
 
     // Configure plugins
     plugins: [
@@ -219,7 +217,7 @@ function createAuth() {
       // TanStack Start cookie integration - must be after all plugins that set cookies
       // (emailOTP, passkey, lastLoginMethod)
       tanstackStartCookies(),
-    ],
+    ] as const,
 
     // Custom user fields to match existing schema, This is BetterAuth user table.
     user: {
@@ -228,6 +226,7 @@ function createAuth() {
           type: 'string',
           required: false,
           defaultValue: 'active' as const,
+          returned: true,
         },
       },
     },

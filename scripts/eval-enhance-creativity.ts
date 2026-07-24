@@ -67,11 +67,15 @@ if (!CURRENT_ENHANCE_PROMPT) {
   process.exit(1);
 }
 
-const openRouterKey = process.env.OPENROUTER_KEY;
-if (!openRouterKey) {
-  console.error('OPENROUTER_KEY is required (set in .env.local).');
-  process.exit(1);
+function requireOpenRouterKey(): string {
+  const key = process.env.OPENROUTER_KEY;
+  if (!key) {
+    throw new Error('OPENROUTER_KEY is required (set in .env.local).');
+  }
+  return key;
 }
+
+const openRouterKey = requireOpenRouterKey();
 
 function parseArg(name: string): string | undefined {
   const pref = `--${name}=`;

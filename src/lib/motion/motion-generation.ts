@@ -82,6 +82,10 @@ export async function submitMotionJob(
     ? await options.scopedDb.apiKeys.resolveKey('fal')
     : { key: getEnv().FAL_KEY, source: 'platform' as const };
 
+  if (!falApiKeyInfo.key) {
+    throw new Error('FAL_KEY is required for motion generation');
+  }
+
   // Locally-served /r2/ image URLs aren't reachable by real fal — swap them
   // for a fal-storage upload first (no-op in prod and e2e replay).
   const imageUrl = await ensureExternallyFetchableUrl(
@@ -147,8 +151,11 @@ export async function pollMotionJob(
     ? await scopedDb.apiKeys.resolveKey('fal')
     : { key: getEnv().FAL_KEY, source: 'platform' as const };
 
-  // Create the Tanstack AI adapter and poll the job status
+  if (!falApiKeyInfo.key) {
+    throw new Error('FAL_KEY is required for motion status checks');
+  }
 
+  // Create the Tanstack AI adapter and poll the job status
   return await getVideoJobStatus({
     adapter: falVideo(modelConfig.id, {
       apiKey: falApiKeyInfo.key,

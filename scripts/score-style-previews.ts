@@ -68,11 +68,15 @@ const FILTER = parseArg('filter') ?? null;
 const SCENE = parseArg('scene') ?? null; // e.g. --scene action (only that scene)
 const THRESHOLD = Number(parseArg('threshold') ?? '6');
 const CONCURRENCY = Number(parseArg('concurrency') ?? '6');
-const openRouterKey = process.env.OPENROUTER_KEY;
-if (!openRouterKey) {
-  console.error('OPENROUTER_KEY is required to score previews.');
-  process.exit(1);
+function requireOpenRouterKey(): string {
+  const key = process.env.OPENROUTER_KEY;
+  if (!key) {
+    throw new Error('OPENROUTER_KEY is required to score previews.');
+  }
+  return key;
 }
+
+const openRouterKey = requireOpenRouterKey();
 
 const sceneVerdictSchema = z.object({
   name: z.string(),

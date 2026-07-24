@@ -188,6 +188,10 @@ async function callFalAudio(
     ? await options.scopedDb.apiKeys.resolveKey('fal')
     : { key: getEnv().FAL_KEY, source: 'platform' as const };
 
+  if (!falApiKeyInfo.key) {
+    throw new Error('FAL_KEY is required for music generation');
+  }
+
   const adapter = falAudio(modelConfig.id, { apiKey: falApiKeyInfo.key });
   const result = await generateAudio({
     adapter,

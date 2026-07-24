@@ -1,0 +1,116 @@
+import type { MentionItem } from '@/components/scenes/prompt-mention/mention-items';
+import { MarkdownEditor } from '@/components/text-editor/markdown-editor';
+import { cn } from '@/lib/utils';
+import type * as React from 'react';
+import { useCallback } from 'react';
+
+type ScriptEditorProps = {
+  value: string;
+  onValueChange: (value: string) => void;
+  ref?: React.Ref<HTMLDivElement | null>;
+  error?: string;
+  maxLength?: number;
+  placeholder?: string;
+  disabled?: boolean;
+  showCharacterCount?: boolean;
+  loading?: boolean;
+  /**
+   * Sequence cast/elements/locations. When provided, their canonical tags in
+   * the script render as @-mention pills (and `@` autocompletes them) — same
+   * behaviour as the scene prompt editors. Omit on the pre-analysis create
+   * screen where no canonical tags exist yet.
+   */
+  mentionItems?: MentionItem[];
+};
+
+export const ScriptEditor: React.FC<ScriptEditorProps> = ({
+  value,
+  onValueChange,
+  ref,
+  error,
+  maxLength = 5000,
+  placeholder = 'Enter your script here...',
+  disabled = false,
+  showCharacterCount = true,
+  loading = false,
+  mentionItems,
+}) => {
+  const handleChange = useCallback(
+    (markdown: string) => {
+      if (!maxLength || markdown.length <= maxLength) {
+        onValueChange(markdown);
+      }
+    },
+    [onValueChange, maxLength]
+  );
+
+  const handleKeyDown = useCallback((event: KeyboardEvent) => {
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      const target = event.target;
+      const form = target instanceof Element ? target.closest('form') : null;
+      form?.requestSubmit();
+      return true;
+    }
+    return false;
+  }, []);
+
+  const isOverLimit = Boolean(maxLength && value.length > maxLength);
+  const hasError = Boolean(error) || isOverLimit;
+  const editorValue = loading ? 'Loading...' : value;
+
+  return (
+    <>
+      <div className="min-h-0 flex-1 flex flex-col overflow-hidden">
+        <MarkdownEditor
+          scrollRef={ref}
+          id="script"
+          name="script"
+          value={editorValue}
+          onValueChange={handleChange}
+          onKeyDown={handleKeyDown}
+          mentionItems={mentionItems}
+          placeholder={placeholder}
+          disabled={disabled}
+          aria-invalid={hasError}
+          className={cn(
+            'min-h-[4lh] flex-1 bg-transparent dark:bg-transparent border-none shadow-none focus-within:ring-0 focus-within:border-input overscroll-contain pb-10',
+            hasError && 'border-destructive focus-within:ring-destructive/20'
+          )}
+          data-testid="script-editor-textarea"
+        />
+      </div>
+
+      <div className="shrink-0 flex items-center justify-between">
+        {showCharacterCount && (
+          <div className="text-sm text-muted-foreground">
+            <span
+              className={cn(isOverLimit && 'text-destructive font-medium')}
+              data-testid="character-count"
+            >
+              {value.length.toLocaleString()}
+            </span>
+            {maxLength && (
+              <>
+                {' / '}
+                <span>{maxLength.toLocaleString()}</span>
+                <span> characters</span>
+              </>
+            )}
+          </div>
+        )}
+
+        {error && (
+          <div
+            className="text-sm text-destructive font-medium"
+            data-testid="error-message"
+            role="alert"
+            aria-live="polite"
+          >
+            {error}
+          </div>
+        )}
+      </div>
+    </>
+  );
+};

@@ -1,0 +1,245 @@
+/**
+ * Registry of AI models available for script analysis.
+ * Ordered by qualityRank (1 = best). Open-source models noted with license field.
+ */
+
+export const SCRIPT_ANALYSIS_MODELS = [
+  {
+    id: 'x-ai/grok-4.5',
+    name: 'Grok 4.5',
+    provider: 'xAI',
+    license: 'proprietary' as const,
+    qualityRank: 1,
+    contextWindow: 500_000,
+    // Accepts image input — required so the motion-prompt pass can be
+    // conditioned on the rendered starting frame (#929). Conservative: only
+    // models known to accept image input are `true`; text-only models fall
+    // back to the text-only motion prompt path.
+    vision: true,
+    description: 'Frontier xAI reasoning model with 500K context',
+  },
+  {
+    id: 'anthropic/claude-fable-5',
+    name: 'Claude Fable 5',
+    provider: 'Anthropic',
+    license: 'proprietary' as const,
+    qualityRank: 2,
+    contextWindow: 1_000_000,
+    vision: true,
+    description: 'Most intelligent Anthropic model, new tier above Opus',
+  },
+  {
+    id: 'anthropic/claude-sonnet-5',
+    name: 'Claude Sonnet 5',
+    provider: 'Anthropic',
+    license: 'proprietary' as const,
+    qualityRank: 3,
+    contextWindow: 1_000_000,
+    vision: true,
+    description: 'State-of-the-art coding and structured output',
+  },
+  {
+    id: 'x-ai/grok-4.20',
+    name: 'Grok 4.20',
+    provider: 'xAI',
+    license: 'proprietary' as const,
+    qualityRank: 4,
+    contextWindow: 2_000_000,
+    vision: true,
+    description: 'Lowest hallucination rate, flagship agentic model',
+  },
+  {
+    id: 'anthropic/claude-opus-4.8',
+    name: 'Claude Opus 4.8',
+    provider: 'Anthropic',
+    license: 'proprietary' as const,
+    qualityRank: 5,
+    contextWindow: 1_000_000,
+    vision: true,
+    description: 'Frontier reasoning and coding',
+  },
+  {
+    id: 'mistralai/mistral-small-2603',
+    name: 'Mistral Small 4',
+    provider: 'Mistral',
+    license: 'open-source' as const,
+    qualityRank: 6,
+    contextWindow: 262_144,
+    vision: true,
+    description: 'Apache 2.0, 119B MoE, multimodal + agentic coding',
+  },
+  {
+    id: 'deepseek/deepseek-v3.2',
+    name: 'DeepSeek V3.2',
+    provider: 'DeepSeek',
+    license: 'open-source' as const,
+    qualityRank: 7,
+    contextWindow: 163_840,
+    // Text-only.
+    vision: false,
+    description: 'MIT license, MMLU 94.2, GPT-5 class reasoning',
+  },
+  {
+    id: 'z-ai/glm-5.2',
+    name: 'GLM-5.2',
+    provider: 'Z.ai',
+    license: 'open-source' as const,
+    qualityRank: 8,
+    contextWindow: 1_048_576,
+    // GLM-5.2 is text-only. Image-bearing calls (the vision-conditioned motion
+    // path, #929) transparently route to `DEFAULT_VISION_MODEL` — see
+    // `resolveVisionModel`. GLM's own vision sibling GLM-4.6V was tried (#942)
+    // but can't do strict structured outputs, which the motion-prompt call
+    // requires, so it failed; we fall back to the default vision model (#944).
+    vision: false,
+    description: 'Large-scale reasoning model, 1M context, long-horizon agents',
+  },
+  {
+    id: 'google/gemini-3.1-pro-preview',
+    name: 'Gemini 3.1 Pro',
+    provider: 'Google',
+    license: 'proprietary' as const,
+    qualityRank: 9,
+    contextWindow: 1_048_576,
+    vision: true,
+    description: 'Frontier multimodal reasoning with 1M context',
+  },
+  {
+    id: 'openai/gpt-5.5',
+    name: 'GPT-5.5',
+    provider: 'OpenAI',
+    license: 'proprietary' as const,
+    qualityRank: 10,
+    contextWindow: 1_050_000,
+    vision: true,
+    description: 'Latest GPT-5 series with 1M context',
+  },
+  {
+    id: 'google/gemini-3-flash-preview',
+    name: 'Gemini 3 Flash',
+    provider: 'Google',
+    license: 'proprietary' as const,
+    qualityRank: 11,
+    contextWindow: 1_048_576,
+    vision: true,
+    description: 'Fast multimodal with 1M context',
+  },
+  {
+    id: 'openai/gpt-5.4-mini',
+    name: 'GPT-5.4 Mini',
+    provider: 'OpenAI',
+    license: 'proprietary' as const,
+    qualityRank: 12,
+    contextWindow: 400_000,
+    vision: true,
+    description: 'Fast reasoning with configurable effort modes',
+  },
+  {
+    id: 'bytedance-seed/seed-2.0-mini',
+    name: 'Seed 2.0 Mini',
+    provider: 'ByteDance',
+    license: 'proprietary' as const,
+    qualityRank: 13,
+    contextWindow: 262_144,
+    vision: true,
+    description: 'Fast multimodal with 4 reasoning effort modes',
+  },
+  {
+    id: 'openai/gpt-5.4-nano',
+    name: 'GPT-5.4 Nano',
+    provider: 'OpenAI',
+    license: 'proprietary' as const,
+    qualityRank: 14,
+    contextWindow: 400_000,
+    vision: true,
+    description: 'Fastest and most cost-efficient GPT-5.4 variant',
+  },
+] as const;
+
+type AnalysisModel = (typeof SCRIPT_ANALYSIS_MODELS)[number];
+export type AnalysisModelId = AnalysisModel['id'];
+
+/**
+ * Get model by ID
+ */
+export function getAnalysisModelById(id: string): AnalysisModel | undefined {
+  return SCRIPT_ANALYSIS_MODELS.find((model) => model.id === id);
+}
+
+/**
+ * Runtime validation: Check if a string is a valid AnalysisModelId
+ * @param value - String value to validate
+ * @returns true if value is a valid model ID, false otherwise
+ */
+export function isValidAnalysisModelId(
+  value: unknown
+): value is AnalysisModelId {
+  return (
+    typeof value === 'string' &&
+    SCRIPT_ANALYSIS_MODELS.some((model) => model.id === value)
+  );
+}
+
+/**
+ * Get all model IDs
+ */
+function getAllModelIds(): AnalysisModelId[] {
+  return SCRIPT_ANALYSIS_MODELS.map((model) => model.id);
+}
+
+export const ANALYSIS_MODEL_IDS = getAllModelIds();
+
+/**
+ * Get context window size (in tokens) for a model
+ */
+export function getContextWindow(modelId: string): number {
+  const model = SCRIPT_ANALYSIS_MODELS.find((m) => m.id === modelId);
+  return model?.contextWindow ?? 128_000;
+}
+
+/**
+ * Whether an analysis model accepts image input. Used by the motion-prompt
+ * pass to decide whether to attach the rendered starting frame as a vision
+ * input (#929). Unknown models default to `false` so an image is never sent
+ * to a model that can't accept one — the motion prompt simply falls back to
+ * the text-only path.
+ */
+export function analysisModelSupportsVision(modelId: string): boolean {
+  return getAnalysisModelById(modelId)?.vision ?? false;
+}
+
+/**
+ * Vision-capable model that image-bearing calls fall back to when the chosen
+ * analysis model is text-only (#944). The motion-prompt pass conditions on the
+ * rendered still (#929), so a text model selected for analysis still needs a
+ * multimodal model for that one call. Sonnet is the default: it does vision +
+ * strict structured outputs + reasoning, which the motion-prompt call requires
+ * (GLM's vision siblings can't do strict structured outputs — see #942/#944).
+ */
+export const DEFAULT_VISION_MODEL: AnalysisModelId =
+  'anthropic/claude-sonnet-5';
+
+/**
+ * Resolve which model should actually run a call given whether it carries image
+ * input. A text-only model with image input is swapped to `DEFAULT_VISION_MODEL`
+ * so the image can be used; everything else runs as chosen. The effective model
+ * drives the adapter, context window, and cost; callers keep storing/hashing the
+ * requested model.
+ */
+export function resolveVisionModel(
+  modelId: AnalysisModelId,
+  hasImageInput: boolean
+): AnalysisModelId {
+  if (!hasImageInput || analysisModelSupportsVision(modelId)) return modelId;
+  return DEFAULT_VISION_MODEL;
+}
+/**
+ * Default model to use when none is specified
+ */
+export const DEFAULT_ANALYSIS_MODEL: AnalysisModelId = 'x-ai/grok-4.5';
+
+/**
+ * Image generation models are now in src/lib/ai/models.ts
+ * Use IMAGE_MODELS, TextToImageModelId, and related helpers from there instead.
+ * @deprecated Import from @/lib/ai/models instead
+ */

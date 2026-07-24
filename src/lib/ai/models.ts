@@ -1,0 +1,511 @@
+/**
+ * FAL AI model definitions
+ * Separated to avoid circular dependencies between service and client modules
+ */
+
+import type { AnalysisModelId } from '@/lib/ai/models.config';
+import type { AspectRatio } from '@/lib/constants/aspect-ratios';
+import { MOTION_INPUT_SCHEMAS } from '@/lib/motion/endpoint-map';
+import { z } from 'zod';
+
+import { getLogger } from '@/lib/observability/logger';
+
+const logger = getLogger(['openstory', 'ai', 'models']);
+
+// ============================================================================
+// Text (Chat/LLM) Models — OpenRouter
+// ============================================================================
+
+/**
+ * Valid text model IDs for OpenRouter chat/LLM calls.
+ * Derived from our curated SCRIPT_ANALYSIS_MODELS list in models.config.ts.
+ * (The @tanstack/ai-openrouter adapter's built-in model list is stale.)
+ */
+export type TextModel = AnalysisModelId;
+
+/**
+ * Image-to-video models (for motion generation)
+ *
+ * API-contract details (durations, aspect ratios, image URL field names) are
+ * derived from OpenAPI schemas — see MOTION_ENDPOINT_META and MOTION_TRANSFORMS
+ * in src/lib/motion/generated/endpoint-map.ts.
+ *
+ * Only model-level metadata lives here: identity, audio override, performance.
+ */
+export const IMAGE_TO_VIDEO_MODELS = {
+  grok_imagine_video_1_5: {
+    id: 'xai/grok-imagine-video/v1.5/image-to-video',
+    name: 'Grok Imagine Video 1.5',
+    provider: 'Grok',
+    license: 'proprietary' as const,
+    qualityRank: 1,
+    maxPromptLength: 2500,
+    performance: { estimatedGenerationTime: 20, quality: 'best' as const },
+  },
+  ltx_2_3_pro: {
+    id: 'fal-ai/ltx-2.3/image-to-video',
+    name: 'LTX 2.3 Pro',
+    provider: 'Lightricks',
+    license: 'open-source' as const,
+    qualityRank: 2,
+    maxPromptLength: 2500,
+    performance: { estimatedGenerationTime: 15, quality: 'best' as const },
+  },
+  veo3_1: {
+    id: 'fal-ai/veo3.1/image-to-video',
+    name: 'Veo 3.1',
+    provider: 'Google',
+    license: 'proprietary' as const,
+    qualityRank: 2,
+    maxPromptLength: 20000,
+    performance: { estimatedGenerationTime: 25, quality: 'best' as const },
+  },
+  kling_v3_pro: {
+    id: 'fal-ai/kling-video/v3/pro/image-to-video',
+    name: 'Kling v3 Pro',
+    provider: 'Kling',
+    license: 'proprietary' as const,
+    qualityRank: 3,
+    maxPromptLength: 2500,
+    performance: { estimatedGenerationTime: 20, quality: 'best' as const },
+  },
+  minimax_hailuo_02: {
+    id: 'fal-ai/minimax/hailuo-2.3/pro/image-to-video',
+    name: 'MiniMax Hailuo 2.3',
+    provider: 'MiniMax',
+    license: 'proprietary' as const,
+    qualityRank: 5,
+    maxPromptLength: 2500,
+    performance: { estimatedGenerationTime: 15, quality: 'best' as const },
+  },
+  seedance_v2: {
+    id: 'bytedance/seedance-2.0/enterprise/v2/image-to-video',
+    name: 'Seedance 2.0',
+    provider: 'ByteDance',
+    license: 'proprietary' as const,
+    qualityRank: 2,
+    maxPromptLength: 4096,
+    performance: { estimatedGenerationTime: 20, quality: 'best' as const },
+  },
+} as const;
+
+/**
+ * Available models for image generation with rich metadata
+ */
+export const IMAGE_MODELS = {
+  nano_banana_2: {
+    id: 'fal-ai/nano-banana-2' as const,
+    name: 'Nano Banana 2',
+    provider: 'Google',
+    license: 'proprietary' as const,
+    qualityRank: 1,
+    description: "Google's latest fast image generation and editing model",
+    maxPromptLength: 50000,
+  },
+  nano_banana_pro: {
+    id: 'fal-ai/nano-banana-pro' as const,
+    name: 'Nano Banana Pro',
+    provider: 'Google',
+    license: 'proprietary' as const,
+    qualityRank: 2,
+    description: 'Enhanced realism and typography',
+    maxPromptLength: 50000,
+  },
+  gpt_image_2: {
+    id: 'openai/gpt-image-2' as const,
+    name: 'GPT Image 2',
+    provider: 'OpenAI',
+    license: 'proprietary' as const,
+    qualityRank: 2,
+    description: 'Near-perfect text rendering, UI fidelity, up to 4K',
+    maxPromptLength: 32000,
+  },
+  grok_imagine_image: {
+    id: 'xai/grok-imagine-image/quality/text-to-image' as const,
+    name: 'Grok Imagine Image Quality',
+    provider: 'Grok',
+    license: 'proprietary' as const,
+    qualityRank: 3,
+    description: 'High-quality aesthetic image generation with low censoring',
+    maxPromptLength: 4000,
+  },
+  flux_2_max: {
+    id: 'fal-ai/flux-2-max' as const,
+    name: 'FLUX.2 Max',
+    provider: 'Black Forest Labs',
+    license: 'proprietary' as const,
+    qualityRank: 4,
+    description: 'Exceptional realism, precision, and consistency',
+    maxPromptLength: 2000,
+  },
+  phota: {
+    id: 'fal-ai/phota' as const,
+    name: 'Phota',
+    provider: 'Phota',
+    license: 'proprietary' as const,
+    qualityRank: 5,
+    description: 'Character consistency via profiles',
+    maxPromptLength: 8000,
+  },
+  hunyuan_image_v3: {
+    id: 'fal-ai/hunyuan-image/v3/text-to-image' as const,
+    name: 'Hunyuan Image v3',
+    provider: 'Tencent',
+    license: 'open-source' as const,
+    qualityRank: 6,
+    description: 'Open source with strong composition',
+    maxPromptLength: 2000,
+  },
+  flux_2_dev: {
+    id: 'fal-ai/flux-2' as const,
+    name: 'FLUX.2 Dev',
+    provider: 'Black Forest Labs',
+    license: 'open-source' as const,
+    qualityRank: 7,
+    description: '32B open weights with native editing',
+    maxPromptLength: 2000,
+  },
+  qwen_image: {
+    id: 'fal-ai/qwen-image-2/pro/text-to-image' as const,
+    name: 'Qwen Image 2 Pro',
+    provider: 'Alibaba',
+    license: 'open-source' as const,
+    qualityRank: 8,
+    description: 'Apache 2.0, native 2K, text rendering, editing support',
+    maxPromptLength: 2000,
+  },
+  hidream_i1: {
+    id: 'fal-ai/hidream-i1-full' as const,
+    name: 'HiDream I1',
+    provider: 'HiDream',
+    license: 'open-source' as const,
+    qualityRank: 9,
+    description: 'MIT licensed, 17B parameters',
+    maxPromptLength: 2000,
+  },
+  seedream_v5: {
+    id: 'fal-ai/bytedance/seedream/v5/lite/text-to-image' as const,
+    name: 'Seedream 5',
+    provider: 'ByteDance',
+    license: 'proprietary' as const,
+    qualityRank: 10,
+    description: 'Unified generation and editing',
+    maxPromptLength: 2000,
+  },
+  flux_2_turbo: {
+    id: 'fal-ai/flux-2/turbo' as const,
+    name: 'FLUX.2 Turbo',
+    provider: 'Black Forest Labs',
+    license: 'open-source' as const,
+    qualityRank: 99,
+    description: 'Ultra-fast preview generation',
+    maxPromptLength: 2000,
+    hidden: true,
+  },
+} as const;
+
+// Text to image model types
+export type TextToImageModel = keyof typeof IMAGE_MODELS;
+type ImageModelConfig = (typeof IMAGE_MODELS)[TextToImageModel];
+type TextToImageModelId = ImageModelConfig['id'];
+
+export const DEFAULT_IMAGE_MODEL: TextToImageModel = 'gpt_image_2';
+
+/** Model used for fast preview image generation */
+export const PREVIEW_IMAGE_MODEL: TextToImageModel = 'flux_2_turbo';
+
+// Helper to get model ID from key
+export function getTextToImageModelId(
+  modelKey: TextToImageModel
+): TextToImageModelId {
+  return IMAGE_MODELS[modelKey].id;
+}
+
+// Helper to get model config by ID
+export function getImageModelById(id: string): ImageModelConfig | undefined {
+  return Object.values(IMAGE_MODELS).find((model) => model.id === id);
+}
+
+// Image to video model types
+export type ImageToVideoModel = keyof typeof IMAGE_TO_VIDEO_MODELS;
+
+export const DEFAULT_VIDEO_MODEL: ImageToVideoModel = 'seedance_v2';
+
+function schemaOf(modelKey: ImageToVideoModel) {
+  return MOTION_INPUT_SCHEMAS[IMAGE_TO_VIDEO_MODELS[modelKey].id];
+}
+
+/** Check if a video model supports audio output.
+ *  Checks the Zod schema for a generate_audio field, respects per-model overrides. */
+export function videoModelSupportsAudio(modelKey: ImageToVideoModel): boolean {
+  const config = IMAGE_TO_VIDEO_MODELS[modelKey];
+  if ('supportsAudio' in config && typeof config.supportsAudio === 'boolean')
+    return config.supportsAudio;
+  return 'generate_audio' in schemaOf(modelKey).shape;
+}
+
+/**
+ * Runtime validation: Check if a string is a valid TextToImageModel key
+ * @param value - String value to validate
+ * @returns true if value is a valid model key, false otherwise
+ */
+export function isValidTextToImageModel(
+  value: unknown
+): value is TextToImageModel {
+  return typeof value === 'string' && Object.keys(IMAGE_MODELS).includes(value);
+}
+
+/**
+ * Runtime validation: Check if a string is a valid ImageToVideoModel key
+ * @param value - String value to validate
+ * @returns true if value is a valid model key, false otherwise
+ */
+export function isValidImageToVideoModel(
+  value: unknown
+): value is ImageToVideoModel {
+  return (
+    typeof value === 'string' &&
+    Object.keys(IMAGE_TO_VIDEO_MODELS).includes(value)
+  );
+}
+
+/**
+ * Safely cast database string to TextToImageModel with validation
+ * Falls back to default if invalid
+ * @param value - Database string value (potentially invalid)
+ * @param fallback - Default value to use if invalid (defaults to DEFAULT_IMAGE_MODEL)
+ * @returns Valid TextToImageModel
+ */
+export function safeTextToImageModel(
+  value: string | null | undefined,
+  fallback: TextToImageModel = DEFAULT_IMAGE_MODEL
+): TextToImageModel {
+  if (!value || !isValidTextToImageModel(value)) {
+    if (value) {
+      logger.warn(
+        `Invalid TextToImageModel "${value}", using fallback "${fallback}"`
+      );
+    }
+    return fallback;
+  }
+  return value;
+}
+
+/**
+ * Safely cast database string to ImageToVideoModel with validation
+ * Falls back to default if invalid
+ * @param value - Database string value (potentially invalid)
+ * @param fallback - Default value to use if invalid (defaults to DEFAULT_VIDEO_MODEL)
+ * @returns Valid ImageToVideoModel
+ */
+export function safeImageToVideoModel(
+  value: string | null | undefined,
+  fallback: ImageToVideoModel = DEFAULT_VIDEO_MODEL
+): ImageToVideoModel {
+  if (!value || !isValidImageToVideoModel(value)) {
+    if (value) {
+      logger.warn(
+        `Invalid ImageToVideoModel "${value}", using fallback "${fallback}"`
+      );
+    }
+    return fallback;
+  }
+  return value;
+}
+
+/**
+ * Check if a video model supports a specific aspect ratio
+ * @param model - The video model key to check
+ * @param aspectRatio - The aspect ratio to check for
+ * @returns true if the model supports the aspect ratio
+ */
+export function isModelCompatibleWithAspectRatio(
+  model: ImageToVideoModel,
+  aspectRatio: AspectRatio
+): boolean {
+  const schema = schemaOf(model);
+  if (!('aspect_ratio' in schema.shape)) return true;
+  return z
+    .object({ aspect_ratio: schema.shape.aspect_ratio })
+    .safeParse({ aspect_ratio: aspectRatio }).success;
+}
+
+/**
+ * Get all video models that support a specific aspect ratio
+ * @param aspectRatio - The aspect ratio to filter by
+ * @returns Array of compatible model keys
+ */
+function getModelsForAspectRatio(
+  aspectRatio: AspectRatio
+): ImageToVideoModel[] {
+  return Object.keys(IMAGE_TO_VIDEO_MODELS).filter(
+    (key): key is ImageToVideoModel =>
+      isValidImageToVideoModel(key) &&
+      isModelCompatibleWithAspectRatio(key, aspectRatio)
+  );
+}
+
+/**
+ * Get a compatible video model for an aspect ratio, falling back if needed
+ * @param currentModel - The currently selected model
+ * @param aspectRatio - The target aspect ratio
+ * @returns The current model if compatible, otherwise a compatible fallback
+ */
+export function getCompatibleModel(
+  currentModel: ImageToVideoModel,
+  aspectRatio: AspectRatio
+): ImageToVideoModel {
+  if (isModelCompatibleWithAspectRatio(currentModel, aspectRatio)) {
+    return currentModel;
+  }
+  // Try default first
+  if (isModelCompatibleWithAspectRatio(DEFAULT_VIDEO_MODEL, aspectRatio)) {
+    return DEFAULT_VIDEO_MODEL;
+  }
+  // Fall back to first compatible model
+  const compatible = getModelsForAspectRatio(aspectRatio);
+  return compatible[0] ?? DEFAULT_VIDEO_MODEL;
+}
+
+// ============================================================================
+// Audio/Music Generation Models
+// ============================================================================
+
+/**
+ * Audio/music generation models
+ * Used for generating background music and sound effects per scene
+ */
+export const AUDIO_MODELS = {
+  elevenlabs_music: {
+    id: 'fal-ai/elevenlabs/music' as const,
+    name: 'ElevenLabs Music',
+    provider: 'ElevenLabs',
+    license: 'proprietary' as const,
+    qualityRank: 1,
+    type: 'music' as const,
+    capabilities: {
+      supportsPrompt: true,
+      supportsInstrumental: true,
+      maxDuration: 600,
+      defaultDuration: 60,
+      supportedFormats: ['mp3'],
+    },
+    performance: {
+      estimatedGenerationTime: 30,
+      quality: 'best',
+    },
+  },
+  ace_step_1_5: {
+    id: 'fal-ai/ace-step-1.5' as const,
+    name: 'ACE-Step 1.5',
+    provider: 'ACE Studio',
+    license: 'open-source' as const,
+    qualityRank: 2,
+    type: 'music' as const,
+    capabilities: {
+      supportsPrompt: true,
+      supportsLyrics: true,
+      supportsInstrumental: true,
+      maxDuration: 600,
+      defaultDuration: 60,
+      supportedFormats: ['wav'],
+    },
+    performance: {
+      estimatedGenerationTime: 25,
+      quality: 'best',
+    },
+  },
+  ace_step: {
+    id: 'fal-ai/ace-step/prompt-to-audio' as const,
+    name: 'ACE-Step',
+    provider: 'ACE Studio',
+    license: 'open-source' as const,
+    qualityRank: 3,
+    type: 'music' as const,
+    capabilities: {
+      supportsPrompt: true,
+      supportsLyrics: true,
+      supportsInstrumental: true,
+      maxDuration: 240,
+      defaultDuration: 60,
+      supportedFormats: ['wav'],
+    },
+    performance: {
+      estimatedGenerationTime: 20,
+      quality: 'best',
+    },
+  },
+} as const;
+
+// Audio model types
+export type AudioModel = keyof typeof AUDIO_MODELS;
+export type AudioModelConfig = (typeof AUDIO_MODELS)[AudioModel];
+
+export const DEFAULT_MUSIC_MODEL: AudioModel = 'elevenlabs_music';
+
+export function isValidAudioModel(value: unknown): value is AudioModel {
+  return typeof value === 'string' && Object.keys(AUDIO_MODELS).includes(value);
+}
+
+export function getAudioModelDurationLimits(model: AudioModel) {
+  const config = AUDIO_MODELS[model];
+  return {
+    max: config.capabilities.maxDuration,
+    default: config.capabilities.defaultDuration,
+  };
+}
+
+export function safeAudioModel(
+  value: string | null | undefined,
+  fallback: AudioModel = DEFAULT_MUSIC_MODEL
+): AudioModel {
+  if (!value || !isValidAudioModel(value)) {
+    if (value) {
+      logger.warn(
+        `Invalid AudioModel "${value}", using fallback "${fallback}"`
+      );
+    }
+    return fallback;
+  }
+  return value;
+}
+
+// ============================================================================
+// Edit Endpoint Support (for reference image generation)
+// ============================================================================
+
+/**
+ * Map text-to-image models to their edit endpoints (if available)
+ * These endpoints accept image_urls for reference-based generation
+ */
+export const EDIT_ENDPOINTS: Partial<Record<TextToImageModel, string>> = {
+  nano_banana_2: 'fal-ai/nano-banana-2/edit',
+  nano_banana_pro: 'fal-ai/nano-banana-pro/edit',
+  gpt_image_2: 'openai/gpt-image-2/edit',
+  grok_imagine_image: 'xai/grok-imagine-image/quality/edit',
+  flux_2_max: 'fal-ai/flux-2-max/edit',
+  phota: 'fal-ai/phota/edit',
+  hunyuan_image_v3: 'fal-ai/hunyuan-image/v3/instruct/edit',
+  flux_2_dev: 'fal-ai/flux-2/edit',
+  flux_2_turbo: 'fal-ai/flux-2/turbo/edit',
+  qwen_image: 'fal-ai/qwen-image-2/pro/edit',
+  seedream_v5: 'fal-ai/bytedance/seedream/v5/lite/edit',
+};
+
+/**
+ * Get the edit endpoint for a model that supports reference images
+ * @param model - The text-to-image model key
+ * @returns The Fal.ai edit endpoint ID, or null if not supported
+ */
+export function getEditEndpoint(model: TextToImageModel): string | null {
+  return EDIT_ENDPOINTS[model] ?? null;
+}
+
+/**
+ * Check if a model supports reference images via an edit endpoint
+ * @param model - The text-to-image model key
+ * @returns true if the model has an edit endpoint for reference images
+ */
+export function supportsReferenceImages(model: TextToImageModel): boolean {
+  return model in EDIT_ENDPOINTS;
+}

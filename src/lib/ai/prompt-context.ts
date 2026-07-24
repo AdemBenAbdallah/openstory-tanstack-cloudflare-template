@@ -1,0 +1,160 @@
+import {
+  charactersToBible,
+  sequenceElementsToBible,
+  sequenceLocationsToBible,
+} from '@/lib/ai/bibles-from-scoped';
+import {
+  DEFAULT_ANALYSIS_MODEL,
+  getAnalysisModelById,
+} from '@/lib/ai/models.config';
+import type {
+  CharacterBibleEntry,
+  ElementBibleEntry,
+  LocationBibleEntry,
+  Scene,
+} from '@/lib/ai/scene-analysis.schema';
+import type { ScopedDb } from '@/lib/db/scoped';
+import type { StyleConfig } from '@/lib/db/schema';
+import { StyleConfigSchema } from '@/lib/db/schema';
+import {
+  matchCharactersToScene,
+  matchElementsToScene,
+  matchLocationsToScene,
+} from '@/lib/workflows/scene-matching';
+
+export type ShotPromptContext = {
+  scene: Scene;
+  styleConfig: StyleConfig;
+  characterBible: CharacterBibleEntry[];
+  locationBible: LocationBibleEntry[];
+  elementBible: ElementBibleEntry[];
+  aspectRatio: string;
+  analysisModel: string;
+  /**
+   * URL of the rendered starting-shot image (`shots.thumbnailUrl`), when
+   * known. Only the motion-prompt hash consumes it (#929); pass it at sites
+   * that stamp or verify `motionPromptInputHash` so a re-rendered image
+   * re-stales the motion prompt. Left undefined for visual-only sites.
+   */
+  startingFrameImageUrl?: string | null;
+};
+
+export type ShotPromptContextSequence = {
+  id: string;
+  styleId: string | null;
+  aspectRatio: string;
+  analysisModel: string;
+};
+
+export async function loadShotPromptContext(args: {
+  scopedDb: Pick<
+    ScopedDb,
+    'characters' | 'sequenceLocations' | 'sequenceElements' | 'styles'
+  >;
+  sequence: ShotPromptContextSequence;
+  scene: Scene;
+  /** Override analysis model — used when a stored variant pins one. */
+  analysisModelOverride?: string | null;
+  /**
+   * URL of the shot's rendered starting image, when this context will feed a
+   * motion-prompt hash (#929). Callers pass `shot.thumbnailUrl`.
+   */
+  startingFrameImageUrl?: string | null;
+}): Promise<ShotPromptContext> {
+  const {
+    scopedDb,
+    sequence,
+    scene,
+    analysisModelOverride,
+    startingFrameImageUrl,
+  } = args;
+
+  if (!sequence.styleId) {
+    throw new Error(
+      `Sequence ${sequence.id} has no style selected; prompt context unavailable`
+    );
+  }
+
+  const [characters, locations, elements, style] = await Promise.all([
+    scopedDb.characters.listWithSheets(sequence.id),
+    scopedDb.sequenceLocations.listWithReferences(sequence.id),
+    scopedDb.sequenceElements.list(sequence.id),
+    scopedDb.styles.getById(sequence.styleId),
+  ]);
+
+  if (!style) {
+    throw new Error(`Style ${sequence.styleId} not found`);
+  }
+
+  const analysisModel =
+    analysisModelOverride ??
+    getAnalysisModelById(sequence.analysisModel)?.id ??
+    DEFAULT_ANALYSIS_MODEL;
+
+  return {
+    scene,
+    styleConfig: StyleConfigSchema.parse(style.config),
+    characterBible: charactersToBible(characters),
+    locationBible: sequenceLocationsToBible(locations),
+    elementBible: sequenceElementsToBible(elements),
+    aspectRatio: sequence.aspectRatio,
+    analysisModel,
+    startingFrameImageUrl,
+  };
+}
+
+/**
+ * Same as `loadShotPromptContext` but narrows the character / location /
+ * element bibles down to the entries this scene actually references — i.e. the
+ * inputs that would actually change the regenerated prompt. Used when stamping
+ * or comparing `visualPromptInputHash` / `motionPromptInputHash` so unrelated
+ * sequence entities don't poison the hash.
+ *
+ * Matching mirrors the same logic that decides reference-image attachment at
+ * generation time (`scene-matching.ts`), so if the hash flips, regeneration
+ * really would see different inputs.
+ */
+export async function loadNarrowShotPromptContext(args: {
+  scopedDb: Pick<
+    ScopedDb,
+    'characters' | 'sequenceLocations' | 'sequenceElements' | 'styles'
+  >;
+  sequence: ShotPromptContextSequence;
+  scene: Scene;
+  analysisModelOverride?: string | null;
+  startingFrameImageUrl?: string | null;
+}): Promise<ShotPromptContext> {
+  const full = await loadShotPromptContext(args);
+  return narrowShotPromptContext(full);
+}
+
+/**
+ * Filter an already-built `ShotPromptContext` down to the entities this
+ * scene's `continuity` references. Pure function — exposed so workflows that
+ * already received full bibles as inputs (visual/motion prompt scene workflows)
+ * can narrow without re-fetching from the DB.
+ */
+export function narrowShotPromptContext(
+  ctx: ShotPromptContext
+): ShotPromptContext {
+  const { scene } = ctx;
+  const continuity = scene.continuity;
+  if (!continuity) return ctx;
+
+  const characterBible = matchCharactersToScene(
+    ctx.characterBible,
+    continuity.characterTags
+  );
+  const locationBible = matchLocationsToScene(
+    ctx.locationBible,
+    continuity.environmentTag,
+    scene.metadata?.location ?? ''
+  );
+  const elementBible = matchElementsToScene(
+    ctx.elementBible,
+    continuity.elementTags ?? [],
+    scene.originalScript.extract
+  );
+
+  return { ...ctx, characterBible, locationBible, elementBible };
+}

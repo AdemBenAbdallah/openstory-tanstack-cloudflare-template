@@ -1,0 +1,695 @@
+/**
+ * LLM client for AI services
+ * Uses @tanstack/ai-openrouter adapters for unified AI integration
+ */
+
+import type { TextModel } from '@/lib/ai/models';
+import { reportMissingBillingCost } from '@/lib/billing/billing-observability';
+import {
+  usdToMicros,
+  ZERO_MICROS,
+  type Microdollars,
+} from '@/lib/billing/money';
+import type { ChatMessage } from '@/lib/prompts';
+import {
+  chat,
+  convertSchemaToJsonSchema,
+  type DebugOption,
+  type TokenUsage,
+} from '@tanstack/ai';
+import type { ProviderPreferences } from '@tanstack/ai-openrouter';
+import { webSearchTool } from '@tanstack/ai-openrouter/tools';
+import { z } from 'zod';
+import { aiDebugLogger } from './ai-debug-logger';
+import { createAdapter, type LlmKeyInfo } from './create-adapter';
+
+import { getLogger } from '@/lib/observability/logger';
+
+const logger = getLogger(['openstory', 'ai', 'llm-client']);
+
+/**
+ * Convert a completed LLM call's usage into a charge. OpenRouter reports an
+ * authoritative per-request `cost` (USD) on every response; we charge that raw
+ * cost at face value in `deductCredits`. Logs and charges
+ * nothing when no cost was reported, surfacing the gap rather than guessing.
+ */
+export function llmCostFromUsage(
+  usage: TokenUsage | undefined,
+  modelId: string
+): Microdollars {
+  if (
+    !usage ||
+    typeof usage.cost !== 'number' ||
+    !Number.isFinite(usage.cost)
+  ) {
+    reportMissingBillingCost({
+      source: 'llm-cost-from-usage',
+      modelId,
+      metadata: { usage },
+    });
+    return ZERO_MICROS;
+  }
+  return usdToMicros(usage.cost);
+}
+
+export type StreamChunk<T = never> =
+  | { done: false; delta: string; accumulated: string }
+  | {
+      done: true;
+      delta: '';
+      accumulated: string;
+      /**
+       * Validated structured output. Default `T = never` makes this `undefined`
+       * when no `responseSchema` was provided; with a schema, narrows to `T | undefined`
+       * (undefined when the stream ended without a `structured-output.complete` event).
+       */
+      parsed: T | undefined;
+      /**
+       * Provider-reported usage for the call (OpenRouter carries `cost`).
+       * `undefined` when the adapter reported none. Pass to `llmCostFromUsage`
+       * to bill the call.
+       */
+      usage: TokenUsage | undefined;
+    };
+
+export type LLMRequestParams<T = unknown> = {
+  model: TextModel;
+  messages: ChatMessage[];
+  temperature?: number;
+  max_tokens?: number;
+  top_p?: number;
+  frequency_penalty?: number;
+  presence_penalty?: number;
+  stream?: boolean;
+  provider?: ProviderPreferences;
+  /** Observation name for Langfuse (forwarded via AI event bridge) */
+  observationName?: string;
+  /** Prompt reference for Langfuse trace linking */
+  prompt?: { name: string; version: number; isFallback: boolean };
+  /** Tags for Langfuse filtering */
+  tags?: string[];
+  /** Additional metadata for Langfuse */
+  metadata?: Record<string, unknown>;
+  /** User id for Langfuse/PostHog user attribution */
+  userId?: string;
+  /** Session id for Langfuse trace grouping (typically sequenceId) */
+  sessionId?: string;
+  responseSchema?: z.ZodType<T>;
+  /** Resolved LLM key info — `via` decides endpoint routing + auth scheme. */
+  apiKey?: LlmKeyInfo;
+  /**
+   * Enable OpenRouter's web-search server tool for this request. The model
+   * decides when to search; OpenRouter runs the search server-side inside the
+   * agent loop and feeds results back. `true` uses defaults; pass an object to
+   * tune the engine / result count / search prompt.
+   */
+  webSearch?:
+    | boolean
+    | { engine?: 'native' | 'exa'; maxResults?: number; searchPrompt?: string };
+
+  /**
+   * Enable the model's reasoning/thinking pass (OpenRouter unified reasoning).
+   * `effort` is the simplest knob — higher = more internal deliberation before
+   * the answer. Reasoning tokens stream as separate events from the answer
+   * content, so the accumulated text the caller receives stays clean (no
+   * scratch work to strip). Use for tasks where a forward pass converges on the
+   * obvious/modal answer and genuine divergence needs a planning step.
+   */
+  reasoning?: {
+    effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+    enabled?: boolean;
+    maxTokens?: number;
+  };
+
+  /**
+   * Debug mode forwarded to `chat()`. `true`/`false`, or a
+   * `{ logger, …categories }` config. Pass `{ logger: aiDebugLogger }`
+   * (from `@/lib/ai/ai-debug-logger`) to see full payloads in local Workerd
+   * dev — `debug: true` uses TanStack's `console.dir`, which Workerd's console
+   * doesn't render.
+   */
+  debug?: DebugOption;
+};
+
+/**
+ * Models that support structured outputs via OpenRouter.
+ * https://openrouter.ai/docs/guides/features/structured-outputs
+ */
+const STRUCTURED_OUTPUT_MODELS = new Set([
+  'x-ai/grok-4.5',
+  'anthropic/claude-fable-5',
+  'anthropic/claude-sonnet-5',
+  'x-ai/grok-4.20',
+  'anthropic/claude-opus-4.8',
+  'deepseek/deepseek-v3.2',
+  'z-ai/glm-5.2',
+  'google/gemini-3.1-pro-preview',
+  'openai/gpt-5.5',
+  'google/gemini-3-flash-preview',
+  'mistralai/mistral-small-2603',
+  'openai/gpt-5.4-mini',
+  'bytedance-seed/seed-2.0-mini',
+  'openai/gpt-5.4-nano',
+]);
+
+function modelSupportsStructuredOutputs(model: string): boolean {
+  return STRUCTURED_OUTPUT_MODELS.has(model);
+}
+
+export const RECOMMENDED_MODELS = {
+  creative: 'anthropic/claude-sonnet-5',
+  structured: 'anthropic/claude-sonnet-5',
+  fast: 'anthropic/claude-sonnet-5',
+  premium: 'anthropic/claude-fable-5',
+} as const;
+
+/**
+ * Shared reasoning config for the creative generation paths (script enhance +
+ * prompt generation). `medium` effort balances the creativity lift against the
+ * added latency — a forward pass converges on the modal/obvious answer, and the
+ * planning step is what escapes it (see #875 and the eval notes in #870).
+ *
+ * NOT applied to utility calls (prompt shortening, duration estimation) where a
+ * forward pass is already correct and reasoning would only add latency. Enabled
+ * in E2E too — unlike live web search it's deterministic once recorded, so
+ * aimock records + replays the reasoning request/response like any other call.
+ */
+export const PROMPT_REASONING = {
+  enabled: true,
+  effort: 'medium',
+} as const satisfies NonNullable<LLMRequestParams['reasoning']>;
+
+/**
+ * System messages must be strings (they become systemPrompts on the adapter).
+ * Collapse any content-part array down to its text parts, discarding any
+ * non-text parts (images in a system message have nowhere to go).
+ */
+function systemContentToString(content: ChatMessage['content']): string {
+  if (typeof content === 'string') return content;
+  return content
+    .map((part) => (part.type === 'text' ? part.content : ''))
+    .filter(Boolean)
+    .join('\n');
+}
+
+type AdapterMessage = {
+  role: 'user' | 'assistant';
+  content: ChatMessage['content'];
+};
+
+function convertMessages(messages: ChatMessage[]): {
+  systemPrompts: string[];
+  messages: AdapterMessage[];
+} {
+  const systemPrompts: string[] = [];
+  const chatMessages: AdapterMessage[] = [];
+
+  for (const msg of messages) {
+    if (msg.role === 'system') {
+      systemPrompts.push(systemContentToString(msg.content));
+    } else {
+      chatMessages.push({ role: msg.role, content: msg.content });
+    }
+  }
+
+  return { systemPrompts, messages: chatMessages };
+}
+
+// Since @tanstack/ai 0.27, sampling options live in provider-native
+// modelOptions (camelCase, per the OpenRouter SDK) instead of the root of
+// chat(). The public LLMRequestParams surface keeps its OpenAI-style
+// snake_case names; this is the single mapping point.
+function buildModelOptions(params: LLMRequestParams) {
+  // Azure-hosted Claude compiles strict structured-output schemas against a
+  // much smaller grammar budget than Anthropic's own endpoint and rejects our
+  // analysis schemas ("The compiled grammar is too large"). Keep Anthropic
+  // models off Azure; an explicit caller-supplied preference still wins.
+  const provider =
+    params.provider ??
+    (params.model.startsWith('anthropic/') ? { ignore: ['azure'] } : undefined);
+  return {
+    ...(provider && { provider }),
+    ...(params.reasoning && { reasoning: params.reasoning }),
+    maxCompletionTokens: params.max_tokens,
+    temperature: params.temperature,
+    topP: params.top_p,
+    frequencyPenalty: params.frequency_penalty,
+    presencePenalty: params.presence_penalty,
+  };
+}
+
+/**
+ * Assemble the `tools` array for `chat()`. Currently only the OpenRouter
+ * web-search server tool, gated on `params.webSearch`. Returns `undefined`
+ * (not an empty array) when no tool is requested so the option is omitted.
+ */
+function buildTools(params: LLMRequestParams) {
+  if (!params.webSearch) return undefined;
+  const opts = params.webSearch === true ? {} : params.webSearch;
+  return [
+    webSearchTool({
+      ...(opts.engine && { engine: opts.engine }),
+      ...(opts.maxResults !== undefined && { maxResults: opts.maxResults }),
+      ...(opts.searchPrompt && { searchPrompt: opts.searchPrompt }),
+    }),
+  ];
+}
+
+function validateStructuredOutputSupport(model: string): void {
+  if (!modelSupportsStructuredOutputs(model)) {
+    throw new Error(
+      `Model ${model} does not support structured outputs. ` +
+        `Supported models: ${[...STRUCTURED_OUTPUT_MODELS].join(', ')}`
+    );
+  }
+}
+
+/**
+ * Anthropic compiles strict structured output into a grammar with a hard,
+ * model-dependent size budget — measured live 2026-07-03 (per-property bisect
+ * pinned to `provider: only anthropic`): Fable 5 and Sonnet 5 reject the
+ * scene-split schema at ~3.7KB even with descriptions stripped (~8.2KB with
+ * them, which every Claude model rejects), Opus 4.8 tolerates ~3.7KB, and
+ * Bedrock/Azure-hosted Claude are no roomier. Every other provider compiles
+ * the same schemas fine. Schemas that fit the budget keep native strict
+ * output (guaranteed-valid JSON); larger ones fall back to `json_object` +
+ * the schema pinned in the prompt. The silent-drop leniency that got the old
+ * fallback removed (#799) is closed by parsing the final text against the
+ * full Zod schema and throwing on mismatch.
+ */
+const ANTHROPIC_GRAMMAR_BUDGET_BYTES = 3_000;
+
+function needsJsonObjectFallback(model: string, schema: z.ZodType): boolean {
+  if (!model.startsWith('anthropic/')) return false;
+  const converted = convertSchemaToJsonSchema(schema, {
+    forStructuredOutput: true,
+  });
+  return JSON.stringify(converted).length > ANTHROPIC_GRAMMAR_BUDGET_BYTES;
+}
+
+/**
+ * How a structured-output call should go on the wire for `model`:
+ * native strict `outputSchema` when the provider's grammar can compile it,
+ * or `json_object` + `instruction` pinned in the system prompt when it can't
+ * (Anthropic large schemas — see {@link ANTHROPIC_GRAMMAR_BUDGET_BYTES}).
+ * Callers on the fallback path MUST validate the final text against the Zod
+ * schema and throw on mismatch.
+ */
+export type StructuredOutputPlan =
+  | { mode: 'native' }
+  | { mode: 'json-object'; instruction: string };
+
+export function planStructuredOutput(
+  model: string,
+  schema: z.ZodType
+): StructuredOutputPlan {
+  if (needsJsonObjectFallback(model, schema)) {
+    return { mode: 'json-object', instruction: jsonSchemaInstruction(schema) };
+  }
+  return { mode: 'native' };
+}
+
+/**
+ * System-prompt instruction that pins a `json_object` response to `schema` —
+ * used for the Anthropic large-schema fallback, where we can't ship a strict
+ * JSON-Schema grammar.
+ */
+function jsonSchemaInstruction(schema: z.ZodType): string {
+  const jsonSchema = convertSchemaToJsonSchema(schema, {
+    forStructuredOutput: true,
+  });
+  return (
+    'You must respond with ONLY a single JSON object that conforms to this ' +
+    'JSON Schema. No markdown, no code fences, no commentary:\n' +
+    JSON.stringify(jsonSchema)
+  );
+}
+
+/** Parse a `json_object` response, tolerating an accidental ```json fence. */
+export function parseJsonObjectResponse(text: string): unknown {
+  const unfenced = text
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '');
+  return JSON.parse(unfenced);
+}
+
+function buildChatMetadata(params: LLMRequestParams) {
+  return {
+    observationName: params.observationName,
+    prompt: params.prompt,
+    tags: params.tags,
+    metadata: params.metadata,
+    userId: params.userId,
+    sessionId: params.sessionId,
+  };
+}
+
+function baseChatOptions(params: LLMRequestParams) {
+  const { systemPrompts, messages } = convertMessages(params.messages);
+  const tools = buildTools(params);
+  return {
+    adapter: createAdapter(params.model, params.apiKey),
+    messages,
+    systemPrompts,
+    modelOptions: buildModelOptions(params),
+    ...(tools && { tools }),
+    debug: params.debug ?? false,
+  };
+}
+
+/**
+ * Log-safe copy of a message's content: image data parts (base64) are
+ * truncated to a short prefix so the prompt log doesn't dump megabytes.
+ */
+function previewContent(
+  content: ChatMessage['content']
+): ChatMessage['content'] {
+  if (typeof content === 'string') return content;
+  return content.map((part) => {
+    if (part.type !== 'image') return part;
+    const value = part.source.value;
+    const preview =
+      value.length > 64
+        ? `${value.slice(0, 64)}…(${value.length} chars)`
+        : value;
+    return { ...part, source: { ...part.source, value: preview } };
+  });
+}
+
+/**
+ * Log the system prompts + messages we're about to send. TanStack AI's
+ * `request` debug category logs only counts (`messageCount`), never the
+ * content, so when `debug` is on we log the actual prompt ourselves through the
+ * Workerd-friendly logger.
+ */
+function logOutgoingPrompt(
+  systemPrompts: string[],
+  messages: AdapterMessage[]
+): void {
+  aiDebugLogger.debug('📝 [llm-client] outgoing prompt', {
+    systemPrompts,
+    messages: messages.map((m) => ({
+      role: m.role,
+      content: previewContent(m.content),
+    })),
+  });
+}
+
+/**
+ * Every structured-output model — Anthropic included — now goes through the
+ * native `outputSchema` path. The response schemas are kept under Anthropic's
+ * strict-grammar limits (≤16 union-typed params; see the note in
+ * `scene-analysis.schema.ts`), so the old `json_object` + schema-in-prompt
+ * fallback for Anthropic is gone: native structured output GUARANTEES
+ * conformance, where the lenient fallback could silently drop required fields.
+ *
+ * @tanstack/ai's chat orchestrator validates `outputSchema` upstream and surfaces
+ * the parsed object through the terminal `structured-output.complete` event (stream)
+ * or as the resolved value (non-stream) — but the return is typed `unknown` because
+ * Zod's `~standard` doesn't include the JSON-Schema converter `InferSchemaType` keys
+ * off. We run `responseSchema.parse` here to recover the `T` binding without a cast
+ * (the orchestrator already validated, so this is a near-free no-op).
+ */
+export async function callLLM<T>(
+  params: LLMRequestParams<T> & { responseSchema: z.ZodType<T> }
+): Promise<T>;
+export async function callLLM(
+  params: LLMRequestParams & { responseSchema?: undefined }
+): Promise<string>;
+export async function callLLM<T>(
+  params: LLMRequestParams<T>
+): Promise<T | string> {
+  // Drain the streaming path instead of calling `chat({ stream: false })`
+  // directly, so non-streaming callers inherit its error handling. Upstream,
+  // `chat({ stream: false })` collects text via `streamToText`, which only
+  // accumulates TEXT_MESSAGE_CONTENT and *ignores RUN_ERROR entirely* — so a
+  // 402 (out of credits), 429, or provider overload silently resolves to '' and
+  // resurfaces downstream as a bogus "empty completion" / JSON-parse failure
+  // (the #718 scene-split mystery). callLLMStream guards every non-content
+  // event with throwIfRunError, so the real provider error propagates. Non-
+  // streaming `chat()` already issues a streaming request under the hood
+  // (runNonStreamingText wraps runStreamingText), so this keeps the wire shape
+  // — and E2E aimock fixtures — identical.
+  if (params.responseSchema) {
+    const responseSchema = params.responseSchema;
+    let parsed: T | undefined;
+    for await (const chunk of callLLMStream({ ...params, responseSchema })) {
+      if (chunk.done) parsed = chunk.parsed;
+    }
+    if (parsed === undefined) {
+      throw new Error(
+        'Structured LLM call returned no validated object (empty completion)'
+      );
+    }
+    return parsed;
+  }
+
+  let accumulated = '';
+  for await (const chunk of callLLMStream({
+    ...params,
+    responseSchema: undefined,
+  })) {
+    accumulated = chunk.accumulated;
+  }
+  return accumulated;
+}
+
+/**
+ * Diagnostic detail pulled from a streaming `RUN_ERROR` event.
+ *
+ * `message` is frequently the provider's opaque headline like "Provider
+ * returned error". Since `@tanstack/ai@0.24` the RUN_ERROR event also carries
+ * `rawEvent` — the provider's *structured* error body (provider name, the
+ * upstream model's error JSON, rate-limit/overload codes) that the
+ * `{ message, code }` collapse deliberately drops. We surface `code`, `model`,
+ * and `rawEvent` alongside `message`, and the caller logs them, so that context
+ * isn't lost when the error propagates (e.g. up to a parent workflow's
+ * "Child workflow … failed: …").
+ */
+export type RunErrorDetail = {
+  message: string;
+  code: string | undefined;
+  model: string | undefined;
+  /**
+   * Provider's structured error body (AG-UI `rawEvent`), when the adapter
+   * attached one. `undefined` for errors carrying no upstream body.
+   */
+  rawEvent: unknown;
+  /** The full RUN_ERROR event, for structured logging. */
+  event: unknown;
+};
+
+/**
+ * Narrow a stream event to a `RUN_ERROR` and extract its diagnostic fields,
+ * or return `null` for any other event. Takes `unknown` because `chat()`'s
+ * yielded event union is wide and not cleanly nameable — this is a type guard
+ * over an arbitrary (possibly malformed) provider shot. Fields are read
+ * defensively: a bad shot can carry a non-string `message`.
+ */
+export function extractRunError(event: unknown): RunErrorDetail | null {
+  if (
+    !event ||
+    typeof event !== 'object' ||
+    !('type' in event) ||
+    event.type !== 'RUN_ERROR'
+  ) {
+    return null;
+  }
+  const message =
+    'message' in event && typeof event.message === 'string'
+      ? event.message
+      : JSON.stringify(
+          'message' in event ? event.message : 'Unknown LLM error'
+        );
+  const code =
+    'code' in event && typeof event.code === 'string' ? event.code : undefined;
+  const model =
+    'model' in event && typeof event.model === 'string'
+      ? event.model
+      : undefined;
+  const rawEvent = 'rawEvent' in event ? event.rawEvent : undefined;
+  return { message, code, model, rawEvent, event };
+}
+
+/**
+ * Dig the upstream provider's *actual* error out of a RUN_ERROR `rawEvent`.
+ * OpenRouter collapses provider failures to a generic "Provider returned
+ * error", stashing the real message in `rawEvent` — at the top level or under
+ * `metadata`, with the upstream body in `raw` (often a JSON string shaped like
+ * `{ error: { message } }`, e.g. an Anthropic schema-validation message).
+ * Returns a compact `provider=… <message>` string, or `undefined` when there's
+ * no usable detail. Read defensively: `rawEvent` is an arbitrary provider shot.
+ */
+function extractProviderErrorDetail(rawEvent: unknown): string | undefined {
+  if (!rawEvent || typeof rawEvent !== 'object') return undefined;
+  const meta =
+    'metadata' in rawEvent &&
+    rawEvent.metadata &&
+    typeof rawEvent.metadata === 'object'
+      ? rawEvent.metadata
+      : rawEvent;
+
+  const provider =
+    'provider_name' in meta && typeof meta.provider_name === 'string'
+      ? meta.provider_name
+      : undefined;
+
+  let deepMessage: string | undefined;
+  const raw = 'raw' in meta ? meta.raw : undefined;
+  if (typeof raw === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      deepMessage =
+        parsed &&
+        typeof parsed === 'object' &&
+        'error' in parsed &&
+        parsed.error &&
+        typeof parsed.error === 'object' &&
+        'message' in parsed.error &&
+        typeof parsed.error.message === 'string'
+          ? parsed.error.message
+          : raw;
+    } catch {
+      deepMessage = raw;
+    }
+  }
+
+  const parts = [
+    provider ? `provider=${provider}` : undefined,
+    deepMessage,
+  ].filter((part): part is string => part !== undefined);
+  return parts.length > 0 ? parts.join(' ') : undefined;
+}
+
+/**
+ * Build the surfaced `Error.message` from a {@link RunErrorDetail}. `code` and
+ * `model` (when present) ride along in a bracketed prefix so they survive in
+ * the error string all the way up the call chain. The provider's real error
+ * (dug out of `rawEvent`) is appended so the string is actionable even though
+ * OpenRouter's top-level `message` is usually just "Provider returned error".
+ */
+export function formatRunErrorMessage(detail: RunErrorDetail): string {
+  const tags = [
+    detail.code,
+    detail.model ? `model=${detail.model}` : undefined,
+  ].filter((tag): tag is string => tag !== undefined);
+  const suffix = tags.length > 0 ? ` [${tags.join(', ')}]` : '';
+  const providerDetail = extractProviderErrorDetail(detail.rawEvent);
+  const detailSuffix = providerDetail ? ` — ${providerDetail}` : '';
+  return `LLM stream error${suffix}: ${detail.message}${detailSuffix}`;
+}
+
+function throwIfRunError(event: unknown): void {
+  const detail = extractRunError(event);
+  if (!detail) return;
+  // Log the formatted string as the message (not as a `{ properties }` field)
+  // so the actual error is visible in the dev pretty sink, which omits the
+  // structured-field block. The full event still rides along for prod JSON.
+  const message = formatRunErrorMessage(detail);
+  logger.error(message, { runError: detail.event, rawEvent: detail.rawEvent });
+  throw new Error(message);
+}
+
+export function callLLMStream<T>(
+  params: LLMRequestParams<T> & { responseSchema: z.ZodType<T> }
+): AsyncGenerator<StreamChunk<T>>;
+export function callLLMStream(
+  params: LLMRequestParams & { responseSchema?: undefined }
+): AsyncGenerator<StreamChunk>;
+export async function* callLLMStream<T>(
+  params: LLMRequestParams<T>
+): AsyncGenerator<StreamChunk<T>> {
+  let accumulated = '';
+  let parsed: T | undefined;
+  let usage: TokenUsage | undefined;
+
+  const baseOptions = {
+    ...baseChatOptions(params),
+    metadata: buildChatMetadata(params),
+    modelOptions: {
+      ...buildModelOptions(params),
+      streamOptions: { includeUsage: true },
+    },
+    // Capture the terminal usage (carries OpenRouter's `cost`) so callers can
+    // bill the call via `llmCostFromUsage`.
+    middleware: [
+      {
+        onFinish: (_ctx: unknown, info: { usage?: TokenUsage }) => {
+          usage = info.usage;
+        },
+      },
+    ],
+    stream: true as const,
+  };
+
+  if (params.debug) {
+    logOutgoingPrompt(baseOptions.systemPrompts, baseOptions.messages);
+  }
+
+  const responseSchema = params.responseSchema;
+  const plan = responseSchema
+    ? planStructuredOutput(params.model, responseSchema)
+    : undefined;
+  if (responseSchema && plan?.mode === 'json-object') {
+    validateStructuredOutputSupport(params.model);
+    // Anthropic large-schema path: json_object + schema-in-prompt (the strict
+    // grammar won't compile — see ANTHROPIC_GRAMMAR_BUDGET_BYTES). The final
+    // text is validated against the full Zod schema below, loudly.
+    for await (const event of chat({
+      ...baseOptions,
+      systemPrompts: [...baseOptions.systemPrompts, plan.instruction],
+      modelOptions: {
+        ...baseOptions.modelOptions,
+        responseFormat: { type: 'json_object' as const },
+      },
+    })) {
+      if (
+        event.type === 'TEXT_MESSAGE_CONTENT' &&
+        typeof event.delta === 'string'
+      ) {
+        accumulated += event.delta;
+        yield { delta: event.delta, accumulated, done: false };
+        continue;
+      }
+      throwIfRunError(event);
+    }
+    parsed = responseSchema.parse(parseJsonObjectResponse(accumulated));
+  } else if (responseSchema) {
+    validateStructuredOutputSupport(params.model);
+    for await (const event of chat({
+      ...baseOptions,
+      outputSchema: responseSchema,
+    })) {
+      if (
+        event.type === 'TEXT_MESSAGE_CONTENT' &&
+        typeof event.delta === 'string'
+      ) {
+        accumulated += event.delta;
+        yield { delta: event.delta, accumulated, done: false };
+        continue;
+      }
+      if (
+        event.type === 'CUSTOM' &&
+        event.name === 'structured-output.complete'
+      ) {
+        // Orchestrator already validated against outputSchema before emitting,
+        // but the event payload is typed `unknown`. Re-parse to recover `T`.
+        parsed = responseSchema.parse(event.value.object);
+        continue;
+      }
+      throwIfRunError(event);
+    }
+  } else {
+    for await (const event of chat(baseOptions)) {
+      if (event.type === 'TEXT_MESSAGE_CONTENT') {
+        accumulated += event.delta;
+        yield { delta: event.delta, accumulated, done: false };
+        continue;
+      }
+      throwIfRunError(event);
+    }
+  }
+
+  yield { delta: '', accumulated, done: true, parsed, usage };
+}
